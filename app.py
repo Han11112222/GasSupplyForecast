@@ -1,4 +1,4 @@
-import io, os, glob, platform, urllib.request
+import io, os, glob, urllib.request
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -14,54 +14,76 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import r2_score, mean_squared_error
 import lightgbm as lgb
 
-# ========================
-# 한글 폰트 (자동 다운로드 포함)
-# ========================
-def _ensure_korean_font_locally() -> str | None:
+# =====================================
+# 🔤 한글 폰트(자동 다운로드 + 전역 적용)
+# =====================================
+def _ensure_korean_font() -> str | None:
+    """
+    1) ./fonts 내부에 한글 폰트 있으면 가장 먼저 사용
+    2) 없으면 NotoSansKR-Regular 자동 다운로드(OTF→TTF 순)
+    """
     os.makedirs("fonts", exist_ok=True)
     local = [p for p in glob.glob("fonts/**/*", recursive=True)
              if p.lower().endswith((".ttf", ".otf", ".ttc"))]
     if local:
         return sorted(local)[0]
+
     urls = [
         "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
         "https://github.com/notofonts/noto-cjk/raw/main/Sans/TTF/Korean/NotoSansKR-Regular.ttf",
     ]
     for url in urls:
         try:
-            fname = os.path.join("fonts", os.path.basename(url))
-            urllib.request.urlretrieve(url, fname)
-            return fname
+            dest = os.path.join("fonts", os.path.basename(url))
+            urllib.request.urlretrieve(url, dest)
+            return dest
         except Exception:
             continue
     return None
 
 def set_korean_font():
     chosen = None
-    fp = _ensure_korean_font_locally()
+    fp = _ensure_korean_font()
     if fp and os.path.exists(fp):
         try:
             fm.fontManager.addfont(fp)
+            # 폰트 캐시 갱신
+            try:
+                fm._load_fontmanager(try_read_cache=False)  # 최신 버전
+            except Exception:
+                try:
+                    fm._rebuild()  # 예전 버전 호환
+                except Exception:
+                    pass
             chosen = fm.FontProperties(fname=fp).get_name()
         except Exception:
             chosen = None
+
     if not chosen:
-        for nm in ["Noto Sans CJK KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
+        # 시스템 설치 후보
+        for nm in ["Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
             if any(f.name == nm for f in fm.fontManager.ttflist):
                 chosen = nm
                 break
+
+    # 전역 적용(한글·마이너스 기호 포함)
     if chosen:
         mpl.rcParams["font.family"] = chosen
+        mpl.rcParams["font.sans-serif"] = [chosen]
     mpl.rcParams["axes.unicode_minus"] = False
     mpl.rcParams["pdf.fonttype"] = 42
     mpl.rcParams["ps.fonttype"] = 42
-    print(f"[Korean Font] 사용 폰트: {chosen if chosen else '기본(영문)'}")
+    return chosen
 
-set_korean_font()
+KOREAN_FONT_NAME = set_korean_font()
+LEGEND_PROP = fm.FontProperties(family=mpl.rcParams.get("font.family"))
 
-# ========================
-# 학습/예측 유틸
-# ========================
+# =====================================
+# ⚙️ 유틸
+# =====================================
+REQUIRED_ACTUAL   = ["날짜", "평균기온", "공급량"]
+REQUIRED_SCENARIO = ["시나리오", "월", "평균기온"]
+
 def fit_one_model(model_name, base_model, X, y):
     if model_name == "3차 다항회귀":
         poly = PolynomialFeatures(degree=3)
@@ -107,97 +129,135 @@ def format_poly_equation(model, poly):
         a3 = coefs[2] if len(coefs) > 2 else 0.0
     return f"3차식: y = {a3:.3e}·x³ + {a2:.3e}·x² + {a1:.3e}·x + {a0:.3e}"
 
-# ========================
-# 파일 로더 (CSV/Excel 자동 판별)
-# ========================
-def _read_scenario_any(src):
-    """CSV/Excel 어떤 형식이든 읽어서 DataFrame 반환"""
-    def _try_csv(bio_or_path):
-        for enc in ["cp949", "utf-8-sig", "utf-8"]:
+def validate_columns(df, required, label):
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"[{label}] 필요한 컬럼 {required} 중 누락: {missing}\n\n현재 컬럼: {list(df.columns)}")
+        st.stop()
+
+# CSV/Excel 자동 판별 리더
+def _read_any(src):
+    """CSV/Excel 어떤 형식이든 읽어서 DataFrame 반환 (UploadedFile/bytes/경로 모두 지원)"""
+    def _try_csv(bio):
+        for enc in ("cp949", "utf-8-sig", "utf-8"):
             try:
-                return pd.read_csv(bio_or_path, encoding=enc)
+                return pd.read_csv(bio, encoding=enc)
             except Exception:
-                if hasattr(bio_or_path, "seek"):
-                    bio_or_path.seek(0)
+                bio.seek(0)
         raise
 
-    if isinstance(src, (bytes, bytearray)):
-        bio = io.BytesIO(src)
+    # UploadedFile/bytes
+    if hasattr(src, "read") or isinstance(src, (bytes, bytearray)):
+        bio = io.BytesIO(src if isinstance(src, (bytes, bytearray)) else src.read())
+        # Excel 먼저
         try:
             bio.seek(0)
             return pd.read_excel(bio)
         except Exception:
             pass
+        # CSV
         bio.seek(0)
         return _try_csv(bio)
 
+    # 경로 문자열
     ext = os.path.splitext(str(src))[1].lower()
-    if ext in [".xlsx", ".xls"]:
+    if ext in (".xlsx", ".xls"):
         return pd.read_excel(src)
     else:
-        return _try_csv(src)
+        # csv
+        for enc in ("cp949", "utf-8-sig", "utf-8"):
+            try:
+                return pd.read_csv(src, encoding=enc)
+            except Exception:
+                continue
+        # 마지막 시도
+        return pd.read_csv(src)
 
 @st.cache_data
 def load_data_mixed(actual_src, scenario_src, is_upload: bool):
-    """actual_src, scenario_src: 업로드면 bytes, repo면 경로 문자열"""
-    if is_upload:
-        data = pd.read_excel(io.BytesIO(actual_src))
-        scenario = _read_scenario_any(scenario_src)
-    else:
-        data = pd.read_excel(actual_src)
-        scenario = _read_scenario_any(scenario_src)
+    """actual_src, scenario_src: 업로드면 bytes/UploadedFile, repo면 경로 문자열"""
+    actual_df   = _read_any(actual_src)
+    scenario_df = _read_any(scenario_src)
 
-    data = data[["날짜", "평균기온", "공급량"]].copy()
+    validate_columns(actual_df, REQUIRED_ACTUAL, "실적 파일")
+    validate_columns(scenario_df, REQUIRED_SCENARIO, "시나리오 파일")
+
+    # 실적 전처리
+    data = actual_df[["날짜", "평균기온", "공급량"]].copy()
     data["날짜"] = pd.to_datetime(data["날짜"])
     data["Year"]  = data["날짜"].dt.year.astype(int)
     data["Month"] = data["날짜"].dt.month.astype(int)
 
-    if "월" in scenario.columns:
-        scenario["월"] = scenario["월"].astype(int)
+    # 시나리오 전처리
+    scenario = scenario_df[["시나리오", "월", "평균기온"]].copy()
+    scenario["월"] = scenario["월"].astype(int)
+    scenario["시나리오"] = scenario["시나리오"].astype(str)
     return data, scenario
 
-# ========================
-# Streamlit UI
-# ========================
+# =====================================
+# 🖥️ Streamlit UI
+# =====================================
 st.set_page_config(page_title="도시가스 공급량 예측/검증", layout="wide")
 st.title("도시가스 공급량 예측 · 검증 대시보드")
+if KOREAN_FONT_NAME:
+    st.caption(f"한글 폰트 적용: {KOREAN_FONT_NAME}")
+else:
+    st.caption("한글 폰트 적용 실패 시, 그래프에서 글자가 깨질 수 있어.")
+
+DEFAULT_ACTUAL_PATH   = "data/실적.xlsx"
+DEFAULT_SCENARIO_PATH = "data/기온시나리오.xlsx"
 
 with st.sidebar:
     st.header("데이터 불러오기 방식")
-    mode = st.radio("방식 선택", ["Repo 내 파일 사용", "파일 업로드"], horizontal=False)
+    mode = st.radio("방식 선택", ["Repo 내 파일 사용", "파일 업로드"], index=0)
 
     if mode == "Repo 내 파일 사용":
         repo_actual = sorted(glob.glob("data/*.xlsx") + glob.glob("data/*.xls"))
-        repo_scn    = sorted(glob.glob("data/*.csv") + glob.glob("data/*.xlsx") + glob.glob("data/*.xls"))
+        repo_scn    = sorted(set(glob.glob("data/*.csv") + glob.glob("data/*.xlsx") + glob.glob("data/*.xls")))
 
-        # 기본값 힌트: data/실적.xlsx, data/기온시나리오.xlsx
-        default_actual = "data/실적.xlsx" if os.path.exists("data/실적.xlsx") else (repo_actual[0] if repo_actual else "")
-        default_scn    = "data/기온시나리오.xlsx" if os.path.exists("data/기온시나리오.xlsx") else (repo_scn[0] if repo_scn else "")
+        # 기본값 인덱스 찾기
+        def pick_idx(options, target):
+            try:
+                return options.index(target)
+            except ValueError:
+                return 0 if options else 0
 
-        actual_path = st.selectbox("실적 파일(Excel)", options=repo_actual or [default_actual], index=0 if repo_actual else 0)
-        sc_path     = st.selectbox("시나리오 파일(CSV/Excel)", options=repo_scn or [default_scn], index=0 if repo_scn else 0)
+        # 기본값 보장
+        if not repo_actual:
+            st.error("data 폴더에 실적 엑셀 파일이 없네. 업로드 모드로 사용하거나 data/실적.xlsx를 넣으면 돼.")
+            st.stop()
+        if not repo_scn:
+            st.error("data 폴더에 시나리오 파일이 없네. data/기온시나리오.xlsx 또는 .csv를 넣으면 돼.")
+            st.stop()
 
-        data_input_ready = bool(actual_path) and bool(sc_path)
+        actual_path = st.selectbox(
+            "실적 파일(Excel)",
+            options=repo_actual,
+            index=pick_idx(repo_actual, DEFAULT_ACTUAL_PATH),
+        )
+        sc_path = st.selectbox(
+            "시나리오 파일(CSV/Excel)",
+            options=repo_scn,
+            index=pick_idx(repo_scn, DEFAULT_SCENARIO_PATH),
+        )
+        data_input_ready = True
 
-    else:  # 파일 업로드
+    else:
         st.header("데이터 업로드")
         data_file = st.file_uploader("실적 엑셀 업로드(.xlsx/.xls)", type=["xlsx", "xls"])
         sc_file   = st.file_uploader("시나리오 업로드(CSV/Excel)", type=["csv", "xlsx", "xls"])
-        st.caption("※ 실적 파일 열 이름: **날짜 / 평균기온 / 공급량**\n"
-                   "※ 시나리오 열 이름: **시나리오 / 월 / 평균기온** (시나리오 값=연도)")
+        st.caption("※ 실적 파일 열: **날짜 / 평균기온 / 공급량**  ·  시나리오 열: **시나리오 / 월 / 평균기온** (시나리오 값=연도)")
         data_input_ready = (data_file is not None) and (sc_file is not None)
 
 if not data_input_ready:
-    st.info("왼쪽 사이드바에서 파일을 선택(또는 업로드)해 시작해줘.")
+    st.info("왼쪽에서 파일을 선택(또는 업로드)하면 바로 처리할게.")
     st.stop()
 
-# 데이터 로드
+# ===== 데이터 로드 =====
 if mode == "Repo 내 파일 사용":
     data, scenario_data = load_data_mixed(actual_path, sc_path, is_upload=False)
 else:
-    data_bytes = data_file.getvalue()
-    sc_bytes   = sc_file.getvalue()
-    data, scenario_data = load_data_mixed(data_bytes, sc_bytes, is_upload=True)
+    data, scenario_data = load_data_mixed(data_file, sc_file, is_upload=True)
 
 min_year, max_year = int(data["Year"].min()), int(data["Year"].max())
 models = {
@@ -209,7 +269,7 @@ models = {
     "최근접이웃": KNeighborsRegressor(),
 }
 
-# ---------------- 설정 ----------------
+# ===== 설정 =====
 st.sidebar.header("예측/검증 설정")
 forecast_year = st.sidebar.selectbox(
     "예측연도(Y)", options=list(range(min_year+1, max_year+2)),
@@ -228,13 +288,13 @@ st.sidebar.markdown("---")
 want_excel = st.sidebar.checkbox("엑셀로 결과 저장")
 out_name   = st.sidebar.text_input("엑셀 파일명", "forecast_backtest_report.xlsx")
 
-# -------- 예측 실행 --------
+# ===== 예측 =====
 if len(sel_models) == 0:
     st.warning("모델을 1개 이상 선택해줘.")
     st.stop()
 
 if not scenario_exists_for_year(scenario_data, forecast_year):
-    st.error(f"시나리오 데이터에 '{forecast_year}' 항목이 없습니다.")
+    st.error(f"시나리오 데이터에 '{forecast_year}' 항목이 없어.")
     st.stop()
 
 m1, m2 = month_range
@@ -254,7 +314,7 @@ for name in sel_models:
     r2_train_pred[name] = r2_score(yp, predict_with(name, mdl, poly, Xp)) if len(yp) > 1 else np.nan
 
 if len(trained_pred) == 0:
-    st.error("예측용 학습에 성공한 모델이 없습니다.")
+    st.error("예측용 학습에 성공한 모델이 없어.")
     st.stop()
 
 sdata = scenario_data[(scenario_data["월"] >= m1) & (scenario_data["월"] <= m2)]
@@ -272,7 +332,7 @@ preds_forecast = pd.DataFrame(preds_forecast_rows,
     columns=["Month","기온시나리오","평균기온","Model","학습기간","예측연도","예측공급량"]
 )
 
-# -------- 예측 그래프 --------
+# 그래프(예측)
 fig, ax = plt.subplots(figsize=(11,5))
 for name, grp in preds_forecast.groupby("Model"):
     g = grp.sort_values("Month")
@@ -285,14 +345,14 @@ if show_avg:
 ax.set_title(f"[예측] 예측연도:{forecast_year} / 시나리오:{forecast_year} / 월 {m1}~{m2} / 학습기간 {train_start}~{train_end}")
 ax.set_xlabel("월"); ax.set_ylabel("예측공급량")
 ax.grid(True, alpha=0.3); ax.set_xticks(range(m1, m2+1))
-ax.legend(loc="best", fontsize=9, ncol=2)
+ax.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 if "3차 다항회귀" in trained_pred:
     mdl, poly = trained_pred["3차 다항회귀"]
     eq = format_poly_equation(mdl, poly)
     if eq:
         fig.subplots_adjust(bottom=0.20)
         r2t = r2_train_pred.get("3차 다항회귀", np.nan)
-        fig.text(0.5, 0.02, f"{eq}  |  학습 R²={r2t:.3f}", ha="center", va="bottom", fontsize=9)
+        fig.text(0.5, 0.02, f"{eq}  |  학습 R²={r2t:.3f}", ha="center", va="bottom", fontsize=9, fontproperties=LEGEND_PROP)
 st.pyplot(fig, use_container_width=True)
 
 if show_tables:
@@ -301,11 +361,11 @@ if show_tables:
         preds_forecast.pivot_table(index="Month", columns="Model", values="예측공급량", aggfunc="mean").round(2)
     )
 
-# -------- 검증(backtest): 대상=Y-1, 학습=시작~Y-2 --------
+# ===== 검증(backtest): 대상=Y-1, 학습=시작~Y-2 =====
 Ym1, Ym2 = (forecast_year-1), (forecast_year-2)
 train_bt_end = min(train_end, Ym2)
 if train_bt_end < train_start:
-    st.info(f"[검증] 학습기간이 성립하지 않습니다. (시작={train_start}, 종료={train_bt_end})")
+    st.info(f"[검증] 학습기간이 성립하지 않아. (시작={train_start}, 종료={train_bt_end})")
 else:
     train_bt = data[(data["Year"]>=train_start)&(data["Year"]<=train_bt_end)].dropna(subset=["공급량"])
     Xb, yb = train_bt[["평균기온"]].values, train_bt["공급량"].values
@@ -322,7 +382,7 @@ else:
 
     val_df = data[(data["Year"]==Ym1)&(data["Month"]>=m1)&(data["Month"]<=m2)].dropna(subset=["공급량","평균기온"])
     if val_df.empty:
-        st.info(f"[검증] {Ym1}년 실제 데이터가 없습니다.")
+        st.info(f"[검증] {Ym1}년 실제 데이터가 없어.")
     else:
         X_val, y_val = val_df[["평균기온"]].values, val_df["공급량"].values
         rows, preds_all = [], []
@@ -351,7 +411,8 @@ else:
         ax2.set_title(f"[검증] {Ym1}년 실제(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})")
         ax2.set_xlabel("월"); ax2.set_ylabel("공급량")
         ax2.grid(True, alpha=0.3); ax2.set_xticks(range(m1, m2+1))
-        ax2.legend(loc="best", fontsize=9, ncol=2)
+        ax2.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
+
         if "3차 다항회귀" in trained_bt:
             mdl_bt, poly_bt = trained_bt["3차 다항회귀"]
             eq_bt = format_poly_equation(mdl_bt, poly_bt)
@@ -359,7 +420,7 @@ else:
                 fig2.subplots_adjust(bottom=0.20)
                 r2_val = metrics_df.loc[metrics_df["Model"]=="3차 다항회귀","R2(검증)"]
                 r2_val = float(r2_val.iloc[0]) if len(r2_val)>0 else np.nan
-                fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=9)
+                fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=9, fontproperties=LEGEND_PROP)
         st.pyplot(fig2, use_container_width=True)
 
         if show_tables:
