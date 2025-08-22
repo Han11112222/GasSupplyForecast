@@ -134,9 +134,10 @@ def _fmt_num(x: float) -> str:
     s = f"{x:.6f}".rstrip("0").rstrip(".")
     return s if s else "0"
 
-def _signed(term: float, label: str) -> str:
+def _signed(term: float, label: str | None) -> str:
     sign = "-" if term < 0 else "+"
-    return f"{sign} {_fmt_num(abs(term))}·{label}"
+    core = f"{_fmt_num(abs(term))}"
+    return f"{sign} {core}{('·'+label) if label else ''}"
 
 def format_poly_equation(model, poly):
     if (model is None) or (poly is None):
@@ -154,8 +155,8 @@ def format_poly_equation(model, poly):
         a1 = coefs[0] if len(coefs) > 0 else 0.0
         a2 = coefs[1] if len(coefs) > 1 else 0.0
         a3 = coefs[2] if len(coefs) > 2 else 0.0
-    # "y = a3·x³ ± a2·x² ± a1·x ± a0" (지수표기 금지)
-    eq = f"3차식: y = {_fmt_num(a3)}·x³ {_signed(a2,'x²')} {_signed(a1,'x')} {_signed(a0,'')}".rstrip()
+    # "y = a3·x³ ± a2·x² ± a1·x ± a0" (지수표기 금지, 상수항은 · 없음)
+    eq = f"3차식: y = {_fmt_num(a3)}·x³ {_signed(a2,'x²')} {_signed(a1,'x')} {_signed(a0,None)}".rstrip()
     return eq
 
 def validate_columns(df, required, label):
@@ -379,7 +380,7 @@ if run_clicked:
         if eq:
             fig.subplots_adjust(bottom=0.18)
             r2t = r2_train_pred.get("3차 다항회귀", np.nan)
-            fig.text(0.5, 0.02, f"{eq}  |  학습 R²={_fmt_num(r2t)}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
+            fig.text(0.5, 0.02, f"{eq}  |  학습 R²={r2t:.3f}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
 
     st.pyplot(fig, use_container_width=True)
 
@@ -406,7 +407,7 @@ if run_clicked:
                     st.info(f"[검증 SKIP] {name}: 표본 {len(train_bt)} < n_neighbors {n_neighbors}")
                     continue
             mdl, poly = fit_one_model(name, base, Xb, yb)
-            trained_bt[name] = (mdl, poly))
+            trained_bt[name] = (mdl, poly)   # ← 괄호 오류 수정!
 
         val_df = data[(data["Year"]==Ym1)&(data["Month"]>=m1)&(data["Month"]<=m2)].dropna(subset=["공급량","평균기온"])
         if val_df.empty:
@@ -435,7 +436,7 @@ if run_clicked:
                 gpred = preds_val_df[preds_val_df["Model"]==name].sort_values("Month")
                 lw = 2.2 if name == best_model else 1.5
                 r2v = metrics_df.loc[metrics_df["Model"]==name, "R2(검증)"].values[0]
-                ax2.plot(gpred["Month"], gpred["예측공급량"], marker="o", linewidth=lw, label=f"{name} (R²={_fmt_num(r2v)})")
+                ax2.plot(gpred["Month"], gpred["예측공급량"], marker="o", linewidth=lw, label=f"{name} (R²={r2v:.3f})")
             ax2.set_title(f"[검증] {Ym1}년 실제(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})")
             ax2.set_xlabel("월"); ax2.set_ylabel("공급량")
             ax2.grid(True, alpha=0.3); ax2.set_xticks(range(m1, m2+1))
@@ -448,7 +449,7 @@ if run_clicked:
                     fig2.subplots_adjust(bottom=0.18)
                     r2_val = metrics_df.loc[metrics_df["Model"]=="3차 다항회귀","R2(검증)"]
                     r2_val = float(r2_val.iloc[0]) if len(r2_val)>0 else np.nan
-                    fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={_fmt_num(r2_val)}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
+                    fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
             st.pyplot(fig2, use_container_width=True)
 
             if show_tables:
