@@ -119,14 +119,10 @@ def scenario_exists_for_year(scenario_df, year):
 # ---- 숫자 포맷(지수표기 금지) ----
 def _fmt_num(x: float) -> str:
     ax = abs(x)
-    if ax >= 1e9:
-        return f"{x:,.0f}"
-    if ax >= 1e6:
-        return f"{x:,.1f}"
-    if ax >= 1e3:
-        return f"{x:,.2f}"
-    if ax >= 1:
-        return f"{x:,.3f}"
+    if ax >= 1e9: return f"{x:,.0f}"
+    if ax >= 1e6: return f"{x:,.1f}"
+    if ax >= 1e3: return f"{x:,.2f}"
+    if ax >= 1:   return f"{x:,.3f}"
     s = f"{x:.6f}".rstrip("0").rstrip(".")
     return s if s else "0"
 
@@ -258,13 +254,16 @@ else:
     data, scenario_data = load_data_mixed(st.session_state["up_actual"], st.session_state["up_scn"], is_upload=True)
 
 min_year, max_year = int(data["Year"].min()), int(data["Year"].max())
-current_year = pd.Timestamp.today().year  # ← 현재 연도
+current_year = pd.Timestamp.today().year
+
+# 예측 가능한 연도 풀: (실적 첫해+1) ~ max(실적 마지막+3, 현재+3)
 fy_min = min_year + 1
-fy_max = current_year + 3                 # ← 현재연도 + 3년까지 허용
+fy_max = max(max_year + 3, current_year + 3)
 fy_options = list(range(fy_min, fy_max + 1))
-# 기본값: 실적 마지막 연도 + 1, 단 최대는 fy_max
-fy_default = min(max_year + 1, fy_max)
-fy_default_idx = fy_options.index(fy_default) if fy_default in fy_options else len(fy_options) - 1
+
+# 기본 From/To: From = 실적 마지막+1, To = min(From+3, fy_max)
+fy_from_default = min(max_year + 1, fy_max)
+fy_to_default = min(fy_from_default + 3, fy_max)
 
 models = {
     "3차 다항회귀": LinearRegression(),
@@ -279,11 +278,21 @@ models = {
 with st.sidebar:
     st.header("예측/검증 설정")
     with st.form("run_form", clear_on_submit=False):
-        st.caption("아래 값을 바꾼 뒤 **공급량 예측 실행**을 눌러 반영해.")
-        fy = st.selectbox("예측연도(Y)", options=fy_options, index=fy_default_idx, key="fy")
-        end_max = min(max_year, fy - 1)
-        tr_start = st.slider("학습 시작연도", min_year, end_max, max(min_year, end_max-4), key="tr_start")
-        tr_end   = st.slider("학습 종료연도(≤Y-1)", tr_start, end_max, end_max, key="tr_end")
+        st.caption("예측연도는 From~To(최대 3년 폭). 값 바꾸고 **공급량 예측 실행**을 누르면 반영돼.")
+
+        fy_from = st.selectbox("예측연도 From", options=fy_options,
+                               index=fy_options.index(fy_from_default), key="fy_from")
+        # To 후보는 fy_from ~ fy_from+3 사이, 단 전체 상한은 fy_max
+        to_candidates = [y for y in fy_options if fy_from <= y <= min(fy_from + 3, fy_max)]
+        fy_to = st.selectbox("예측연도 To (≤ From+3)", options=to_candidates,
+                             index=len(to_candidates)-1 if fy_to_default not in to_candidates else to_candidates.index(fy_to_default),
+                             key="fy_to")
+
+        # 학습 종료는 From-1을 넘지 않도록
+        end_cap = min(max_year, fy_from - 1)
+        tr_start = st.slider("학습 시작연도", min_year, end_cap, max(min_year, end_cap-4), key="tr_start")
+        tr_end   = st.slider("학습 종료연도(≤From-1)", tr_start, end_cap, end_cap, key="tr_end")
+
         m1, m2   = st.slider("월 범위", 1, 12, (1, 12), key="mrange")
         sel_models = st.multiselect("모델 선택", list(models.keys()), default=list(models.keys()), key="sel_models")
         show_avg  = st.checkbox("예측영역에 실적(월평균) 보조선", value=False, key="show_avg")
@@ -299,17 +308,16 @@ if "init_run_done" not in st.session_state:
     run_clicked = True
     st.session_state["init_run_done"] = True
 
-# ===== 예측/그래프/검증 =====
+# ===== 공통 체크 =====
 if len(st.session_state["sel_models"]) == 0:
     st.warning("모델을 1개 이상 선택해줘.")
     st.stop()
 
-if not scenario_exists_for_year(scenario_data, st.session_state["fy"]):
-    st.error(f"시나리오 데이터에 '{st.session_state['fy']}' 항목이 없어.")
-    st.stop()
-
+# ===== 실행 =====
 if run_clicked:
-    fy = st.session_state["fy"]
+    fy_from = st.session_state["fy_from"]
+    fy_to   = st.session_state["fy_to"]
+    year_list = [y for y in fy_options if fy_from <= y <= fy_to]  # 포함 범위
     train_start = st.session_state["tr_start"]
     train_end   = st.session_state["tr_end"]
     (m1, m2)    = st.session_state["mrange"]
@@ -319,7 +327,7 @@ if run_clicked:
     want_excel  = st.session_state["want_excel"]
     out_name    = st.session_state["out_name"]
 
-    # ===== 예측 =====
+    # 학습 세트 & 모델 학습 (한 번만)
     train_pred = data[(data["Year"] >= train_start) & (data["Year"] <= train_end)].dropna(subset=["공급량"])
     Xp, yp = train_pred[["평균기온"]].values, train_pred["공급량"].values
 
@@ -339,130 +347,143 @@ if run_clicked:
         st.error("예측용 학습에 성공한 모델이 없어.")
         st.stop()
 
-    sdata = scenario_data[(scenario_data["월"] >= m1) & (scenario_data["월"] <= m2)]
-    sdata = sdata[sdata["시나리오"].astype(str) == str(fy)]
+    # 엑셀 저장 준비
+    excel_buf = io.BytesIO()
+    writer = pd.ExcelWriter(excel_buf, engine="openpyxl") if want_excel else None
 
-    preds_forecast_rows = []
-    for name, (mdl, poly) in trained_pred.items():
-        for _, row in sdata.iterrows():
-            yhat = float(predict_with(name, mdl, poly, np.array([[float(row["평균기온"])]]))[0])
-            preds_forecast_rows.append([
-                int(row["월"]), str(fy), float(row["평균기온"]), name,
-                f"{train_start}~{train_end}", int(fy), yhat
-            ])
-    preds_forecast = pd.DataFrame(preds_forecast_rows,
-        columns=["Month","기온시나리오","평균기온","Model","학습기간","예측연도","예측공급량"]
-    )
+    # 연도별 예측/표/그래프
+    for fy in year_list:
+        if not scenario_exists_for_year(scenario_data, fy):
+            st.warning(f"[예측 {fy}] 시나리오 데이터가 없어. 건너뛸게.")
+            continue
 
-    # --- 예측 그래프 ---
-    fig, ax = plt.subplots(figsize=(11,5))
-    for name, grp in preds_forecast.groupby("Model"):
-        g = grp.sort_values("Month")
-        ax.plot(g["Month"], g["예측공급량"], marker="o", linewidth=1.8, label=name)
-    if show_avg:
-        avg = data.groupby("Month", as_index=False)["공급량"].mean().rename(columns={"공급량":"실적(월평균)"})
-        avg = avg[(avg["Month"]>=m1)&(avg["Month"]<=m2)]
-        ax.plot(avg["Month"], avg["실적(월평균)"], linestyle="--", linewidth=2.2, label="실적(월평균)")
+        sdata = scenario_data[(scenario_data["월"] >= m1) & (scenario_data["월"] <= m2)]
+        sdata = sdata[sdata["시나리오"].astype(str) == str(fy)]
 
-    ax.set_title(f"[예측] 예측연도:{fy} / 시나리오:{fy} / 월 {m1}~{m2} / 학습기간 {train_start}~{train_end}")
-    ax.set_xlabel("월"); ax.set_ylabel("예측공급량")
-    ax.grid(True, alpha=0.3); ax.set_xticks(range(m1, m2+1))
-    ax.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
-
-    if "3차 다항회귀" in trained_pred:
-        mdl, poly = trained_pred["3차 다항회귀"]
-        eq = format_poly_equation(mdl, poly)
-        if eq:
-            fig.subplots_adjust(bottom=0.18)
-            r2t = r2_train_pred.get("3차 다항회귀", np.nan)
-            fig.text(0.5, 0.02, f"{eq}  |  학습 R²={r2t:.3f}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
-
-    st.pyplot(fig, use_container_width=True)
-
-    if show_tables:
-        st.subheader("예측 피벗")
-        st.dataframe(
-            preds_forecast.pivot_table(index="Month", columns="Model", values="예측공급량", aggfunc="mean").round(2)
+        preds_rows = []
+        for name, (mdl, poly) in trained_pred.items():
+            for _, row in sdata.iterrows():
+                yhat = float(predict_with(name, mdl, poly, np.array([[float(row["평균기온"])]]))[0])
+                preds_rows.append([
+                    int(row["월"]), str(fy), float(row["평균기온"]), name,
+                    f"{train_start}~{train_end}", int(fy), yhat
+                ])
+        preds_forecast = pd.DataFrame(preds_rows,
+            columns=["Month","기온시나리오","평균기온","Model","학습기간","예측연도","예측공급량"]
         )
 
-    # ===== 검증(backtest): 대상=Y-1, 학습=시작~Y-2 =====
-    Ym1, Ym2 = (fy-1), (fy-2)
-    train_bt_end = min(train_end, Ym2)
-    if train_bt_end < train_start:
-        st.info(f"[검증] 학습기간이 성립하지 않아. (시작={train_start}, 종료={train_bt_end})")
-    else:
-        train_bt = data[(data["Year"]>=train_start)&(data["Year"]<=train_bt_end)].dropna(subset=["공급량"])
-        Xb, yb = train_bt[["평균기온"]].values, train_bt["공급량"].values
-        trained_bt = {}
-        for name in sel_models:
-            base = models[name]
-            if name == "최근접이웃":
-                n_neighbors = getattr(base, "n_neighbors", 5)
-                if len(train_bt) < n_neighbors:
-                    st.info(f"[검증 SKIP] {name}: 표본 {len(train_bt)} < n_neighbors {n_neighbors}")
-                    continue
-            mdl, poly = fit_one_model(name, base, Xb, yb)
-            trained_bt[name] = (mdl, poly)
+        # --- 예측 그래프 ---
+        fig, ax = plt.subplots(figsize=(11,5))
+        for name, grp in preds_forecast.groupby("Model"):
+            g = grp.sort_values("Month")
+            ax.plot(g["Month"], g["예측공급량"], marker="o", linewidth=1.8, label=name)
+        if show_avg:
+            avg = data.groupby("Month", as_index=False)["공급량"].mean().rename(columns={"공급량":"실적(월평균)"})
+            avg = avg[(avg["Month"]>=m1)&(avg["Month"]<=m2)]
+            ax.plot(avg["Month"], avg["실적(월평균)"], linestyle="--", linewidth=2.2, label="실적(월평균)")
 
-        val_df = data[(data["Year"]==Ym1)&(data["Month"]>=m1)&(data["Month"]<=m2)].dropna(subset=["공급량","평균기온"])
-        if val_df.empty:
-            st.info(f"[검증] {Ym1}년 실제 데이터가 없어.")
+        ax.set_title(f"[예측] 예측연도:{fy} / 시나리오:{fy} / 월 {m1}~{m2} / 학습기간 {train_start}~{train_end}")
+        ax.set_xlabel("월"); ax.set_ylabel("예측공급량")
+        ax.grid(True, alpha=0.3); ax.set_xticks(range(m1, m2+1))
+        ax.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
+
+        if "3차 다항회귀" in trained_pred:
+            mdl, poly = trained_pred["3차 다항회귀"]
+            eq = format_poly_equation(mdl, poly)
+            if eq:
+                fig.subplots_adjust(bottom=0.18)
+                r2t = r2_train_pred.get("3차 다항회귀", np.nan)
+                fig.text(0.5, 0.02, f"{eq}  |  학습 R²={r2t:.3f}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
+
+        st.pyplot(fig, use_container_width=True)
+
+        if show_tables:
+            st.subheader(f"예측 피벗 (Y={fy})")
+            st.dataframe(
+                preds_forecast.pivot_table(index="Month", columns="Model", values="예측공급량", aggfunc="mean").round(2)
+            )
+
+        # --- 검증(backtest): 대상=Y-1 ---
+        Ym1, Ym2 = (fy-1), (fy-2)
+        train_bt_end = min(train_end, Ym2)
+        if train_bt_end < train_start:
+            st.info(f"[검증 Y={fy}] 학습기간이 성립하지 않아. (시작={train_start}, 종료={train_bt_end})")
         else:
-            X_val, y_val = val_df[["평균기온"]].values, val_df["공급량"].values
-            rows, preds_all = [], []
-            for name,(mdl,poly) in trained_bt.items():
-                yhat = predict_with(name, mdl, poly, X_val)
-                r2, rmse, mape = calc_metrics(y_val, yhat)
-                tmp = val_df[["Year","Month"]].copy()
-                tmp["Model"] = name
-                tmp["실제공급량"] = y_val
-                tmp["예측공급량"] = yhat
-                preds_all.append(tmp)
-                rows.append([name, r2, rmse, mape])
+            train_bt = data[(data["Year"]>=train_start)&(data["Year"]<=train_bt_end)].dropna(subset=["공급량"])
+            Xb, yb = train_bt[["평균기온"]].values, train_bt["공급량"].values
+            trained_bt = {}
+            for name in sel_models:
+                base = models[name]
+                if name == "최근접이웃":
+                    n_neighbors = getattr(base, "n_neighbors", 5)
+                    if len(train_bt) < n_neighbors:
+                        st.info(f"[검증 SKIP Y={fy}] {name}: 표본 {len(train_bt)} < n_neighbors {n_neighbors}")
+                        continue
+                mdl, poly = fit_one_model(name, base, Xb, yb)
+                trained_bt[name] = (mdl, poly)
 
-            preds_val_df = pd.concat(preds_all, ignore_index=True) if preds_all else pd.DataFrame()
-            metrics_df   = pd.DataFrame(rows, columns=["Model","R2(검증)","RMSE","MAPE(%)"]).sort_values("R2(검증)", ascending=False)
+            val_df = data[(data["Year"]==Ym1)&(data["Month"]>=m1)&(data["Month"]<=m2)].dropna(subset=["공급량","평균기온"])
+            if val_df.empty:
+                st.info(f"[검증 Y={fy}] {Ym1}년 실제 데이터가 없어.")
+            else:
+                X_val, y_val = val_df[["평균기온"]].values, val_df["공급량"].values
+                rows, preds_all = [], []
+                for name,(mdl,poly) in trained_bt.items():
+                    yhat = predict_with(name, mdl, poly, X_val)
+                    r2, rmse, mape = calc_metrics(y_val, yhat)
+                    tmp = val_df[["Year","Month"]].copy()
+                    tmp["Model"] = name
+                    tmp["실제공급량"] = y_val
+                    tmp["예측공급량"] = yhat
+                    preds_all.append(tmp)
+                    rows.append([name, r2, rmse, mape])
 
-            fig2, ax2 = plt.subplots(figsize=(11,5))
-            gv = val_df.sort_values("Month")
-            ax2.plot(gv["Month"], gv["공급량"], linestyle="--", marker="o", linewidth=3.0, label=f"실제 {Ym1}")
-            best_model = metrics_df.iloc[0]["Model"] if not metrics_df.empty else None
-            for name in metrics_df["Model"] if not metrics_df.empty else []:
-                gpred = preds_val_df[preds_val_df["Model"]==name].sort_values("Month")
-                lw = 2.2 if name == best_model else 1.5
-                r2v = metrics_df.loc[metrics_df["Model"]==name, "R2(검증)"].values[0]
-                ax2.plot(gpred["Month"], gpred["예측공급량"], marker="o", linewidth=lw, label=f"{name} (R²={r2v:.3f})")
-            ax2.set_title(f"[검증] {Ym1}년 실제(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})")
-            ax2.set_xlabel("월"); ax2.set_ylabel("공급량")
-            ax2.grid(True, alpha=0.3); ax2.set_xticks(range(m1, m2+1))
-            ax2.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
+                preds_val_df = pd.concat(preds_all, ignore_index=True) if preds_all else pd.DataFrame()
+                metrics_df   = pd.DataFrame(rows, columns=["Model","R2(검증)","RMSE","MAPE(%)"]).sort_values("R2(검증)", ascending=False)
 
-            if "3차 다항회귀" in trained_bt:
-                mdl_bt, poly_bt = trained_bt["3차 다항회귀"]
-                eq_bt = format_poly_equation(mdl_bt, poly_bt)
-                if eq_bt:
-                    fig2.subplots_adjust(bottom=0.18)
-                    r2_val = metrics_df.loc[metrics_df["Model"]=="3차 다항회귀","R2(검증)"]
-                    r2_val = float(r2_val.iloc[0]) if len(r2_val)>0 else np.nan
-                    fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
-            st.pyplot(fig2, use_container_width=True)
+                fig2, ax2 = plt.subplots(figsize=(11,5))
+                gv = val_df.sort_values("Month")
+                ax2.plot(gv["Month"], gv["공급량"], linestyle="--", marker="o", linewidth=3.0, label=f"실제 {Ym1}")
+                best_model = metrics_df.iloc[0]["Model"] if not metrics_df.empty else None
+                for name in metrics_df["Model"] if not metrics_df.empty else []:
+                    gpred = preds_val_df[preds_val_df["Model"]==name].sort_values("Month")
+                    lw = 2.2 if name == best_model else 1.5
+                    r2v = metrics_df.loc[metrics_df["Model"]==name, "R2(검증)"].values[0]
+                    ax2.plot(gpred["Month"], gpred["예측공급량"], marker="o", linewidth=lw, label=f"{name} (R²={r2v:.3f})")
+                ax2.set_title(f"[검증] Y={fy} → 실제 {Ym1}(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})")
+                ax2.set_xlabel("월"); ax2.set_ylabel("공급량")
+                ax2.grid(True, alpha=0.3); ax2.set_xticks(range(m1, m2+1))
+                ax2.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 
-            if show_tables:
-                st.subheader("검증 성능 요약")
-                st.dataframe(metrics_df.reset_index(drop=True).round(4))
-                if not preds_val_df.empty:
-                    merged = preds_val_df.merge(val_df[["Month","공급량"]], on="Month", how="left", suffixes=("","_실제"))
-                    pv_val = merged.pivot_table(index="Month", columns="Model", values="예측공급량", aggfunc="mean").round(2)
-                    pv_val["실제"] = val_df.set_index("Month")["공급량"].round(2)
-                    st.dataframe(pv_val)
+                if "3차 다항회귀" in trained_bt:
+                    mdl_bt, poly_bt = trained_bt["3차 다항회귀"]
+                    eq_bt = format_poly_equation(mdl_bt, poly_bt)
+                    if eq_bt:
+                        fig2.subplots_adjust(bottom=0.18)
+                        r2_val = metrics_df.loc[metrics_df["Model"]=="3차 다항회귀","R2(검증)"]
+                        r2_val = float(r2_val.iloc[0]) if len(r2_val)>0 else np.nan
+                        fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
+                st.pyplot(fig2, use_container_width=True)
 
-            if want_excel:
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    preds_forecast.to_excel(writer, sheet_name=f"예측(Y={fy})", index=False)
-                    if not val_df.empty:
-                        preds_val_df.to_excel(writer, sheet_name=f"검증(Y-1={fy-1})_월별", index=False)
-                        metrics_df.to_excel(writer, sheet_name=f"모델성능_검증", index=False)
-                st.download_button("엑셀 다운로드", data=output.getvalue(),
-                                   file_name=out_name,
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                if show_tables:
+                    st.subheader(f"검증 성능 요약 (Y={fy})")
+                    st.dataframe(metrics_df.reset_index(drop=True).round(4))
+                    if not preds_val_df.empty:
+                        merged = preds_val_df.merge(val_df[["Month","공급량"]], on="Month", how="left", suffixes=("","_실제"))
+                        pv_val = merged.pivot_table(index="Month", columns="Model", values="예측공급량", aggfunc="mean").round(2)
+                        pv_val["실제"] = val_df.set_index("Month")["공급량"].round(2)
+                        st.dataframe(pv_val)
+
+        # 엑셀 시트 저장
+        if want_excel and writer is not None:
+            preds_forecast.to_excel(writer, sheet_name=f"예측(Y={fy})", index=False)
+
+    # 엑셀 다운로드 버튼
+    if want_excel and writer is not None:
+        writer.close()
+        st.download_button(
+            "엑셀 다운로드",
+            data=excel_buf.getvalue(),
+            file_name=out_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
