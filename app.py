@@ -36,12 +36,10 @@ def _download_font_to_tmp() -> tuple[str | None, str | None]:
 
 def apply_korean_font() -> str | None:
     chosen = None
-    # 1) 시스템 글꼴 먼저
     for nm in ["Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
         if any(f.name == nm for f in fm.fontManager.ttflist):
             chosen = nm
             break
-    # 2) 없으면 다운로드 등록
     css_font_url = None
     if not chosen:
         path, css_font_url = _download_font_to_tmp()
@@ -58,14 +56,12 @@ def apply_korean_font() -> str | None:
                 chosen = fm.FontProperties(fname=path).get_name()
             except Exception:
                 chosen = None
-    # 3) Matplotlib 전역
     if chosen:
         mpl.rcParams["font.family"] = chosen
         mpl.rcParams["font.sans-serif"] = [chosen]
     mpl.rcParams["axes.unicode_minus"] = False
     mpl.rcParams["pdf.fonttype"] = 42
     mpl.rcParams["ps.fonttype"] = 42
-    # 4) Streamlit 웹폰트
     if css_font_url:
         st.markdown(
             f"""
@@ -155,7 +151,6 @@ def format_poly_equation(model, poly):
         a1 = coefs[0] if len(coefs) > 0 else 0.0
         a2 = coefs[1] if len(coefs) > 1 else 0.0
         a3 = coefs[2] if len(coefs) > 2 else 0.0
-    # "y = a3·x³ ± a2·x² ± a1·x ± a0" (지수표기 금지, 상수항은 · 없음)
     eq = f"3차식: y = {_fmt_num(a3)}·x³ {_signed(a2,'x²')} {_signed(a1,'x')} {_signed(a0,None)}".rstrip()
     return eq
 
@@ -165,7 +160,6 @@ def validate_columns(df, required, label):
         st.error(f"[{label}] 필요한 컬럼 {required} 중 누락: {missing}\n\n현재 컬럼: {list(df.columns)}")
         st.stop()
 
-# CSV/Excel 자동 판별 리더
 def _read_any(src):
     def _try_csv(bio):
         for enc in ("cp949", "utf-8-sig", "utf-8"):
@@ -174,7 +168,6 @@ def _read_any(src):
             except Exception:
                 bio.seek(0)
         raise
-
     if hasattr(src, "read") or isinstance(src, (bytes, bytearray)):
         bio = io.BytesIO(src if isinstance(src, (bytes, bytearray)) else src.read())
         try:
@@ -184,7 +177,6 @@ def _read_any(src):
             pass
         bio.seek(0)
         return _try_csv(bio)
-
     ext = os.path.splitext(str(src))[1].lower()
     if ext in (".xlsx", ".xls"):
         return pd.read_excel(src)
@@ -266,6 +258,13 @@ else:
     data, scenario_data = load_data_mixed(st.session_state["up_actual"], st.session_state["up_scn"], is_upload=True)
 
 min_year, max_year = int(data["Year"].min()), int(data["Year"].max())
+current_year = pd.Timestamp.today().year  # ← 현재 연도
+fy_min = min_year + 1
+fy_max = current_year + 3                 # ← 현재연도 + 3년까지 허용
+fy_options = list(range(fy_min, fy_max + 1))
+# 기본값: 실적 마지막 연도 + 1, 단 최대는 fy_max
+fy_default = min(max_year + 1, fy_max)
+fy_default_idx = fy_options.index(fy_default) if fy_default in fy_options else len(fy_options) - 1
 
 models = {
     "3차 다항회귀": LinearRegression(),
@@ -279,11 +278,9 @@ models = {
 # ===== 설정: 폼으로 묶어서 '공급량 예측 실행' 눌러야 반영 =====
 with st.sidebar:
     st.header("예측/검증 설정")
-
     with st.form("run_form", clear_on_submit=False):
         st.caption("아래 값을 바꾼 뒤 **공급량 예측 실행**을 눌러 반영해.")
-        fy = st.selectbox("예측연도(Y)", options=list(range(min_year+1, max_year+2)),
-                          index=(max_year+1 - (min_year+1)), key="fy")
+        fy = st.selectbox("예측연도(Y)", options=fy_options, index=fy_default_idx, key="fy")
         end_max = min(max_year, fy - 1)
         tr_start = st.slider("학습 시작연도", min_year, end_max, max(min_year, end_max-4), key="tr_start")
         tr_end   = st.slider("학습 종료연도(≤Y-1)", tr_start, end_max, end_max, key="tr_end")
@@ -298,7 +295,6 @@ with st.sidebar:
 
         run_clicked = st.form_submit_button("공급량 예측 실행", use_container_width=True, type="primary")
 
-# 첫 로딩은 자동 1회 실행
 if "init_run_done" not in st.session_state:
     run_clicked = True
     st.session_state["init_run_done"] = True
@@ -373,7 +369,6 @@ if run_clicked:
     ax.grid(True, alpha=0.3); ax.set_xticks(range(m1, m2+1))
     ax.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 
-    # 3차식 식(풀숫자 표기)
     if "3차 다항회귀" in trained_pred:
         mdl, poly = trained_pred["3차 다항회귀"]
         eq = format_poly_equation(mdl, poly)
@@ -407,7 +402,7 @@ if run_clicked:
                     st.info(f"[검증 SKIP] {name}: 표본 {len(train_bt)} < n_neighbors {n_neighbors}")
                     continue
             mdl, poly = fit_one_model(name, base, Xb, yb)
-            trained_bt[name] = (mdl, poly)   # ← 괄호 오류 수정!
+            trained_bt[name] = (mdl, poly)
 
         val_df = data[(data["Year"]==Ym1)&(data["Month"]>=m1)&(data["Month"]<=m2)].dropna(subset=["공급량","평균기온"])
         if val_df.empty:
