@@ -1,11 +1,4 @@
-streamlit
-pandas
-numpy
-scikit-learn
-matplotlib
-lightgbm
-openpyxl
-import io, os, platform
+import io, os, glob, platform, urllib.request
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -21,40 +14,65 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import r2_score, mean_squared_error
 import lightgbm as lgb
 
-# -----------------------
-# 한글 폰트: repo/fonts/NanumGothic.ttf 우선 사용
-# -----------------------
-def set_korean_font():
-    candidates = [
-        "fonts/NanumGothic.ttf",  # repo 포함 권장
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-        "C:/Windows/Fonts/malgun.ttf",
-        "/System/Library/Fonts/AppleGothic.ttf",
+# ========================
+# 한글 폰트 (자동 다운로드 포함)
+# ========================
+def _ensure_korean_font_locally() -> str | None:
+    """
+    1) ./fonts 내 폰트가 있으면 우선 사용
+    2) 없으면 NotoSansKR-Regular를 공식 저장소에서 다운로드 시도(OTF→TTF 순)
+    """
+    os.makedirs("fonts", exist_ok=True)
+    local = [p for p in glob.glob("fonts/**/*", recursive=True)
+             if p.lower().endswith((".ttf", ".otf", ".ttc"))]
+    if local:
+        return sorted(local)[0]
+
+    urls = [
+        "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
+        "https://github.com/notofonts/noto-cjk/raw/main/Sans/TTF/Korean/NotoSansKR-Regular.ttf",
     ]
+    for url in urls:
+        try:
+            fname = os.path.join("fonts", os.path.basename(url))
+            urllib.request.urlretrieve(url, fname)
+            return fname
+        except Exception:
+            continue
+    return None
+
+def set_korean_font():
     chosen = None
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                fm.fontManager.addfont(p)
-                chosen = fm.FontProperties(fname=p).get_name()
-                break
-            except Exception:
-                pass
+
+    # 1) ./fonts 또는 자동 다운로드
+    fp = _ensure_korean_font_locally()
+    if fp and os.path.exists(fp):
+        try:
+            fm.fontManager.addfont(fp)
+            chosen = fm.FontProperties(fname=fp).get_name()
+        except Exception:
+            chosen = None
+
+    # 2) 시스템 설치 글꼴 후보
     if not chosen:
-        # 시스템에 설치된 이름으로라도 시도
-        for nm in ["NanumGothic", "Malgun Gothic", "AppleGothic", "Noto Sans CJK KR"]:
+        for nm in ["Noto Sans CJK KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
             if any(f.name == nm for f in fm.fontManager.ttflist):
                 chosen = nm
                 break
+
+    # 3) 전역 설정
     if chosen:
         mpl.rcParams["font.family"] = chosen
-        mpl.rcParams["axes.unicode_minus"] = False
+    mpl.rcParams["axes.unicode_minus"] = False
+    mpl.rcParams["pdf.fonttype"] = 42
+    mpl.rcParams["ps.fonttype"] = 42
+    print(f"[Korean Font] 사용 폰트: {chosen if chosen else '기본(영문)'}")
 
 set_korean_font()
 
-# -----------------------
-# 유틸 함수
-# -----------------------
+# ========================
+# 학습/예측 유틸
+# ========================
 def fit_one_model(model_name, base_model, X, y):
     if model_name == "3차 다항회귀":
         poly = PolynomialFeatures(degree=3)
@@ -100,9 +118,9 @@ def format_poly_equation(model, poly):
         a3 = coefs[2] if len(coefs) > 2 else 0.0
     return f"3차식: y = {a3:.3e}·x³ + {a2:.3e}·x² + {a1:.3e}·x + {a0:.3e}"
 
-# -----------------------
+# ========================
 # Streamlit UI
-# -----------------------
+# ========================
 st.set_page_config(page_title="도시가스 공급량 예측/검증", layout="wide")
 st.title("도시가스 공급량 예측 · 검증 대시보드")
 
@@ -110,8 +128,8 @@ with st.sidebar:
     st.header("데이터 업로드")
     data_file = st.file_uploader("실적 엑셀 업로드(.xlsx)", type=["xlsx", "xls"])
     sc_file   = st.file_uploader("시나리오 CSV 업로드", type=["csv"])
-    st.caption("※ 실적 파일은 열 이름에 **날짜 / 평균기온 / 공급량** 이 있어야 합니다.\n"
-               "※ 시나리오는 열 이름에 **시나리오 / 월 / 평균기온** 이 있어야 합니다.")
+    st.caption("※ 실적 파일 열 이름: **날짜 / 평균기온 / 공급량**\n"
+               "※ 시나리오 열 이름: **시나리오 / 월 / 평균기온** (시나리오 값=연도)")
 
 @st.cache_data
 def load_data(data_file, sc_file):
@@ -125,7 +143,10 @@ def load_data(data_file, sc_file):
     try:
         scenario = pd.read_csv(sc_file, encoding="cp949")
     except UnicodeDecodeError:
-        scenario = pd.read_csv(sc_file, encoding="utf-8")
+        try:
+            scenario = pd.read_csv(sc_file, encoding="utf-8-sig")
+        except Exception:
+            scenario = pd.read_csv(sc_file, encoding="utf-8")
 
     scenario["월"] = scenario["월"].astype(int)
     return data, scenario
@@ -314,7 +335,8 @@ if (data_file is not None) and (sc_file is not None):
                     if not val_df.empty:
                         preds_val_df.to_excel(writer, sheet_name=f"검증(Y-1={forecast_year-1})_월별", index=False)
                         metrics_df.to_excel(writer, sheet_name=f"모델성능_검증", index=False)
-                st.download_button("엑셀 다운로드", data=output.getvalue(), file_name=out_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
+                st.download_button("엑셀 다운로드", data=output.getvalue(),
+                                   file_name=out_name,
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
     st.info("왼쪽 사이드바에서 실적 엑셀과 시나리오 CSV를 업로드해 시작해줘.")
