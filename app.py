@@ -15,85 +15,85 @@ from sklearn.metrics import r2_score, mean_squared_error
 import lightgbm as lgb
 
 # =====================================
-# 🔤 한글 폰트: 자동 다운로드 + Matplotlib + 웹폰트 CSS
+# 🔤 한글 폰트: 레포 폰트 최우선 + 시스템 + (마지막) 다운로드
 # =====================================
-FONT_URLS = [
-    # 안정적인 미러 여러 개 시도
-    "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
-    "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
-    "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
+LOCAL_FONT_CANDIDATES = [
+    "fonts/NanumGothic-Regular.ttf",   # 네가 올린 파일
+    "fonts/NanumGothic.ttf",
+    "fonts/NotoSansKR-Regular.otf",
+    "fonts/NotoSansKR-Regular.ttf",
 ]
 
-def _download_font_to_tmp() -> tuple[str | None, str | None]:
-    """폰트를 /tmp 에 내려받아 Matplotlib에 등록 가능한 파일 경로를 돌려줘.
-    (matplotlib.addfont 는 파일 경로만 받음)"""
+FONT_URLS = [
+    # 최후의 수단: 작은 미러 위주
+    "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
+    "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
+]
+
+def _try_add_font_from_path(path: str) -> tuple[str | None, fm.FontProperties | None]:
+    try:
+        fm.fontManager.addfont(path)
+        # 폰트 캐시 리빌드(버전별 호환)
+        try:
+            fm._load_fontmanager(try_read_cache=False)
+        except Exception:
+            try:
+                fm._rebuild()
+            except Exception:
+                pass
+        name = fm.FontProperties(fname=path).get_name()
+        return name, fm.FontProperties(fname=path)
+    except Exception:
+        return None, None
+
+def _download_font_to_tmp() -> str | None:
     os.makedirs(os.path.join(tempfile.gettempdir(), "fonts"), exist_ok=True)
     for url in FONT_URLS:
         try:
             local = os.path.join(tempfile.gettempdir(), "fonts", os.path.basename(url))
             urllib.request.urlretrieve(url, local)
-            return local, url
+            if os.path.exists(local):
+                return local
         except Exception:
             continue
-    return None, None
+    return None
 
-def apply_korean_font() -> str | None:
-    """Matplotlib 전역 폰트 설정 + 가능하면 웹폰트 CSS 주입."""
-    chosen = None
+def ensure_korean_font() -> tuple[str | None, fm.FontProperties | None]:
+    """Matplotlib 전역 폰트와 범례용 FontProperties를 같은 폰트로 맞춤."""
+    chosen_name, legend_prop = None, None
 
-    # 1) 이미 설치된 시스템 글꼴 탐색
-    for nm in ["Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
-        if any(f.name == nm for f in fm.fontManager.ttflist):
-            chosen = nm
-            break
+    # 1) 레포 로컬 폰트 최우선
+    for p in LOCAL_FONT_CANDIDATES:
+        if os.path.exists(p):
+            chosen_name, legend_prop = _try_add_font_from_path(p)
+            if chosen_name:
+                break
 
-    # 2) 없으면 다운로드 후 등록
-    css_font_url = None
-    if not chosen:
-        path, css_font_url = _download_font_to_tmp()
-        if path and os.path.exists(path):
-            try:
-                fm.fontManager.addfont(path)
-                try:
-                    fm._load_fontmanager(try_read_cache=False)
-                except Exception:
-                    try:
-                        fm._rebuild()
-                    except Exception:
-                        pass
-                chosen = fm.FontProperties(fname=path).get_name()
-            except Exception:
-                chosen = None
+    # 2) 시스템 설치 글꼴
+    if not chosen_name:
+        for nm in ["NanumGothic", "Noto Sans KR", "Noto Sans CJK KR", "Malgun Gothic", "AppleGothic"]:
+            if any(f.name == nm for f in fm.fontManager.ttflist):
+                chosen_name = nm
+                legend_prop = fm.FontProperties(family=nm)
+                break
 
-    # 3) Matplotlib 전역 적용
-    if chosen:
-        mpl.rcParams["font.family"] = chosen
-        mpl.rcParams["font.sans-serif"] = [chosen]
+    # 3) 마지막: 임시 폴더로 다운로드 후 등록
+    if not chosen_name:
+        tmp = _download_font_to_tmp()
+        if tmp:
+            chosen_name, legend_prop = _try_add_font_from_path(tmp)
+
+    # Matplotlib 전역 적용
+    if chosen_name:
+        mpl.rcParams["font.family"] = [chosen_name]
+        mpl.rcParams["font.sans-serif"] = [chosen_name]
     mpl.rcParams["axes.unicode_minus"] = False
     mpl.rcParams["pdf.fonttype"] = 42
     mpl.rcParams["ps.fonttype"] = 42
 
-    # 4) Streamlit UI에도 웹폰트 주입 (제목/캡션/범례 등)
-    if css_font_url:
-        st.markdown(
-            f"""
-            <style>
-            @font-face {{
-              font-family: 'AppKor';
-              src: url('{css_font_url}') format('opentype');
-              font-weight: normal; font-style: normal;
-            }}
-            html, body, [class*="css"] {{
-              font-family: 'AppKor', {chosen if chosen else 'sans-serif'} !important;
-            }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    return chosen
+    return chosen_name, legend_prop
 
-KOREAN_FONT_NAME = apply_korean_font()
-LEGEND_PROP = fm.FontProperties(family=mpl.rcParams.get("font.family"))
+KOREAN_FONT_NAME, LEGEND_PROP = ensure_korean_font()
 
 # =====================================
 # ⚙️ 유틸
@@ -166,13 +166,11 @@ def _read_any(src):
     # UploadedFile/bytes
     if hasattr(src, "read") or isinstance(src, (bytes, bytearray)):
         bio = io.BytesIO(src if isinstance(src, (bytes, bytearray)) else src.read())
-        # Excel 먼저
         try:
             bio.seek(0)
             return pd.read_excel(bio)
         except Exception:
             pass
-        # CSV
         bio.seek(0)
         return _try_csv(bio)
 
@@ -181,7 +179,6 @@ def _read_any(src):
     if ext in (".xlsx", ".xls"):
         return pd.read_excel(src)
     else:
-        # csv
         for enc in ("cp949", "utf-8-sig", "utf-8"):
             try:
                 return pd.read_csv(src, encoding=enc)
@@ -214,7 +211,7 @@ def load_data_mixed(actual_src, scenario_src, is_upload: bool):
 # =====================================
 st.set_page_config(page_title="도시가스 공급량 예측/검증", layout="wide")
 st.title("도시가스 공급량 예측 · 검증 대시보드")
-st.caption(f"한글 폰트 적용: {KOREAN_FONT_NAME if KOREAN_FONT_NAME else '다운로드 실패 → 기본 폰트'}")
+st.caption(f"한글 폰트 적용: {KOREAN_FONT_NAME if KOREAN_FONT_NAME else '기본 폰트(한글 미탑재)'}")
 
 DEFAULT_ACTUAL_PATH   = "data/실적.xlsx"
 DEFAULT_SCENARIO_PATH = "data/기온시나리오.xlsx"
