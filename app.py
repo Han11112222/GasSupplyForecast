@@ -1,4 +1,4 @@
-import io, os, glob, urllib.request
+import io, os, glob, urllib.request, tempfile
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -15,84 +15,85 @@ from sklearn.metrics import r2_score, mean_squared_error
 import lightgbm as lgb
 
 # =====================================
-# 🔤 한글 폰트(자동 다운로드 + 강제 적용 유틸)
+# 🔤 한글 폰트: 자동 다운로드 + Matplotlib + 웹폰트 CSS
 # =====================================
-def _ensure_korean_font_path() -> str | None:
-    """./fonts에 폰트가 있으면 그걸, 없으면 NotoSansKR를 자동 다운로드해서 경로 리턴"""
-    os.makedirs("fonts", exist_ok=True)
-    # 1) 로컬 폰트 먼저
-    for p in sorted(glob.glob("fonts/**/*", recursive=True)):
-        if p.lower().endswith((".ttf", ".otf", ".ttc")):
-            return p
-    # 2) 다운로드
-    urls = [
-        "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
-        "https://github.com/notofonts/noto-cjk/raw/main/Sans/TTF/Korean/NotoSansKR-Regular.ttf",
-    ]
-    for url in urls:
-        try:
-            dst = os.path.join("fonts", os.path.basename(url))
-            urllib.request.urlretrieve(url, dst)
-            return dst
-        except Exception:
-            pass
-    return None
+FONT_URLS = [
+    # 안정적인 미러 여러 개 시도
+    "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
+    "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
+    "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
+]
 
-def _init_korean_font():
-    """
-    - 폰트 파일 경로, 폰트 이름, FontProperties 를 리턴
-    - rcParams에도 반영하지만, 결국엔 fontproperties로 강제 적용할 것
-    """
-    font_path = _ensure_korean_font_path()
-    font_name = None
-    kprop = None
-
-    if font_path and os.path.exists(font_path):
-        fm.fontManager.addfont(font_path)
-        # 캐시 재빌드(환경별 호환)
+def _download_font_to_tmp() -> tuple[str | None, str | None]:
+    """폰트를 /tmp 에 내려받아 Matplotlib에 등록 가능한 파일 경로를 돌려줘.
+    (matplotlib.addfont 는 파일 경로만 받음)"""
+    os.makedirs(os.path.join(tempfile.gettempdir(), "fonts"), exist_ok=True)
+    for url in FONT_URLS:
         try:
-            fm._load_fontmanager(try_read_cache=False)
+            local = os.path.join(tempfile.gettempdir(), "fonts", os.path.basename(url))
+            urllib.request.urlretrieve(url, local)
+            return local, url
         except Exception:
+            continue
+    return None, None
+
+def apply_korean_font() -> str | None:
+    """Matplotlib 전역 폰트 설정 + 가능하면 웹폰트 CSS 주입."""
+    chosen = None
+
+    # 1) 이미 설치된 시스템 글꼴 탐색
+    for nm in ["Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
+        if any(f.name == nm for f in fm.fontManager.ttflist):
+            chosen = nm
+            break
+
+    # 2) 없으면 다운로드 후 등록
+    css_font_url = None
+    if not chosen:
+        path, css_font_url = _download_font_to_tmp()
+        if path and os.path.exists(path):
             try:
-                fm._rebuild()
+                fm.fontManager.addfont(path)
+                try:
+                    fm._load_fontmanager(try_read_cache=False)
+                except Exception:
+                    try:
+                        fm._rebuild()
+                    except Exception:
+                        pass
+                chosen = fm.FontProperties(fname=path).get_name()
             except Exception:
-                pass
-        font_name = fm.FontProperties(fname=font_path).get_name()
-        kprop = fm.FontProperties(fname=font_path)
+                chosen = None
 
-    if not font_name:
-        for nm in ["Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
-            if any(f.name == nm for f in fm.fontManager.ttflist):
-                font_name = nm
-                kprop = fm.FontProperties(family=nm)
-                break
-
-    # rcParams 백업 설정
-    if font_name:
-        mpl.rcParams["font.family"] = font_name
-        mpl.rcParams["font.sans-serif"] = [font_name]
+    # 3) Matplotlib 전역 적용
+    if chosen:
+        mpl.rcParams["font.family"] = chosen
+        mpl.rcParams["font.sans-serif"] = [chosen]
     mpl.rcParams["axes.unicode_minus"] = False
     mpl.rcParams["pdf.fonttype"] = 42
     mpl.rcParams["ps.fonttype"] = 42
-    return font_path, font_name, kprop
 
-KFONT_PATH, KFONT_NAME, KFONT_PROP = _init_korean_font()
+    # 4) Streamlit UI에도 웹폰트 주입 (제목/캡션/범례 등)
+    if css_font_url:
+        st.markdown(
+            f"""
+            <style>
+            @font-face {{
+              font-family: 'AppKor';
+              src: url('{css_font_url}') format('opentype');
+              font-weight: normal; font-style: normal;
+            }}
+            html, body, [class*="css"] {{
+              font-family: 'AppKor', {chosen if chosen else 'sans-serif'} !important;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    return chosen
 
-def apply_kfont(ax, title=None, xlabel=None, ylabel=None):
-    """축/제목/라벨/틱/범례에 한글 폰트 강제 적용"""
-    if not KFONT_PROP:
-        return
-    if title is not None:
-        ax.set_title(title, fontproperties=KFONT_PROP)
-    if xlabel is not None:
-        ax.set_xlabel(xlabel, fontproperties=KFONT_PROP)
-    if ylabel is not None:
-        ax.set_ylabel(ylabel, fontproperties=KFONT_PROP)
-    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
-        lbl.set_fontproperties(KFONT_PROP)
-    leg = ax.get_legend()
-    if leg is not None:
-        leg.set_prop(KFONT_PROP)
+KOREAN_FONT_NAME = apply_korean_font()
+LEGEND_PROP = fm.FontProperties(family=mpl.rcParams.get("font.family"))
 
 # =====================================
 # ⚙️ 유틸
@@ -186,12 +187,10 @@ def _read_any(src):
                 return pd.read_csv(src, encoding=enc)
             except Exception:
                 continue
-        # 마지막 시도
         return pd.read_csv(src)
 
 @st.cache_data
 def load_data_mixed(actual_src, scenario_src, is_upload: bool):
-    """actual_src, scenario_src: 업로드면 bytes/UploadedFile, repo면 경로 문자열"""
     actual_df   = _read_any(actual_src)
     scenario_df = _read_any(scenario_src)
 
@@ -215,10 +214,7 @@ def load_data_mixed(actual_src, scenario_src, is_upload: bool):
 # =====================================
 st.set_page_config(page_title="도시가스 공급량 예측/검증", layout="wide")
 st.title("도시가스 공급량 예측 · 검증 대시보드")
-if KFONT_NAME:
-    st.caption(f"한글 폰트 적용: {KFONT_NAME}")
-else:
-    st.caption("한글 폰트 적용 실패 시, 그래프에서 글자가 깨질 수 있어.")
+st.caption(f"한글 폰트 적용: {KOREAN_FONT_NAME if KOREAN_FONT_NAME else '다운로드 실패 → 기본 폰트'}")
 
 DEFAULT_ACTUAL_PATH   = "data/실적.xlsx"
 DEFAULT_SCENARIO_PATH = "data/기온시나리오.xlsx"
@@ -238,24 +234,15 @@ with st.sidebar:
                 return 0 if options else 0
 
         if not repo_actual:
-            st.error("data 폴더에 실적 엑셀 파일이 없네. 업로드 모드로 쓰면돼, 아니면 data/실적.xlsx를 넣어줘.")
+            st.error("data 폴더에 실적 엑셀 파일이 없네. 업로드 모드로 쓰면 돼.")
             st.stop()
         if not repo_scn:
-            st.error("data 폴더에 시나리오 파일이 없네. data/기온시나리오.xlsx 또는 .csv를 넣어줘.")
+            st.error("data 폴더에 시나리오 파일이 없네. data/기온시나리오.xlsx 또는 .csv 넣으면 돼.")
             st.stop()
 
-        actual_path = st.selectbox(
-            "실적 파일(Excel)",
-            options=repo_actual,
-            index=pick_idx(repo_actual, DEFAULT_ACTUAL_PATH),
-        )
-        sc_path = st.selectbox(
-            "시나리오 파일(CSV/Excel)",
-            options=repo_scn,
-            index=pick_idx(repo_scn, DEFAULT_SCENARIO_PATH),
-        )
+        actual_path = st.selectbox("실적 파일(Excel)", options=repo_actual, index=pick_idx(repo_actual, DEFAULT_ACTUAL_PATH))
+        sc_path     = st.selectbox("시나리오 파일(CSV/Excel)", options=repo_scn, index=pick_idx(repo_scn, DEFAULT_SCENARIO_PATH))
         data_input_ready = True
-
     else:
         st.header("데이터 업로드")
         data_file = st.file_uploader("실적 엑셀 업로드(.xlsx/.xls)", type=["xlsx", "xls"])
@@ -356,26 +343,17 @@ if show_avg:
     avg = avg[(avg["Month"]>=m1)&(avg["Month"]<=m2)]
     ax.plot(avg["Month"], avg["실적(월평균)"], linestyle="--", linewidth=2.2, label="실적(월평균)")
 
-ax.grid(True, alpha=0.3)
-ax.set_xticks(range(m1, m2+1))
-ax.legend(loc="best", fontsize=9, ncol=2)  # legend 글꼴은 아래 apply_kfont에서 강제
-
-apply_kfont(
-    ax,
-    title=f"[예측] 예측연도:{forecast_year} / 시나리오:{forecast_year} / 월 {m1}~{m2} / 학습기간 {train_start}~{train_end}",
-    xlabel="월",
-    ylabel="예측공급량",
-)
-
+ax.set_title(f"[예측] 예측연도:{forecast_year} / 시나리오:{forecast_year} / 월 {m1}~{m2} / 학습기간 {train_start}~{train_end}")
+ax.set_xlabel("월"); ax.set_ylabel("예측공급량")
+ax.grid(True, alpha=0.3); ax.set_xticks(range(m1, m2+1))
+ax.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 if "3차 다항회귀" in trained_pred:
     mdl, poly = trained_pred["3차 다항회귀"]
     eq = format_poly_equation(mdl, poly)
     if eq:
         fig.subplots_adjust(bottom=0.20)
         r2t = r2_train_pred.get("3차 다항회귀", np.nan)
-        fig.text(0.5, 0.02, f"{eq}  |  학습 R²={r2t:.3f}", ha="center", va="bottom", fontsize=9,
-                 fontproperties=KFONT_PROP)
-
+        fig.text(0.5, 0.02, f"{eq}  |  학습 R²={r2t:.3f}", ha="center", va="bottom", fontsize=9, fontproperties=LEGEND_PROP)
 st.pyplot(fig, use_container_width=True)
 
 if show_tables:
@@ -431,16 +409,10 @@ else:
             lw = 2.2 if name == best_model else 1.5
             r2v = metrics_df.loc[metrics_df["Model"]==name, "R2(검증)"].values[0]
             ax2.plot(gpred["Month"], gpred["예측공급량"], marker="o", linewidth=lw, label=f"{name} (R²={r2v:.3f})")
-
-        ax2.grid(True, alpha=0.3)
-        ax2.set_xticks(range(m1, m2+1))
-        ax2.legend(loc="best", fontsize=9, ncol=2)
-        apply_kfont(
-            ax2,
-            title=f"[검증] {Ym1}년 실제(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})",
-            xlabel="월",
-            ylabel="공급량",
-        )
+        ax2.set_title(f"[검증] {Ym1}년 실제(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})")
+        ax2.set_xlabel("월"); ax2.set_ylabel("공급량")
+        ax2.grid(True, alpha=0.3); ax2.set_xticks(range(m1, m2+1))
+        ax2.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 
         if "3차 다항회귀" in trained_bt:
             mdl_bt, poly_bt = trained_bt["3차 다항회귀"]
@@ -449,9 +421,7 @@ else:
                 fig2.subplots_adjust(bottom=0.20)
                 r2_val = metrics_df.loc[metrics_df["Model"]=="3차 다항회귀","R2(검증)"]
                 r2_val = float(r2_val.iloc[0]) if len(r2_val)>0 else np.nan
-                fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=9,
-                          fontproperties=KFONT_PROP)
-
+                fig2.text(0.5, 0.02, f"{eq_bt}  |  검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=9, fontproperties=LEGEND_PROP)
         st.pyplot(fig2, use_container_width=True)
 
         if show_tables:
@@ -470,9 +440,6 @@ else:
                 if not val_df.empty:
                     preds_val_df.to_excel(writer, sheet_name=f"검증(Y-1={forecast_year-1})_월별", index=False)
                     metrics_df.to_excel(writer, sheet_name=f"모델성능_검증", index=False)
-            st.download_button(
-                "엑셀 다운로드",
-                data=output.getvalue(),
-                file_name=out_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            st.download_button("엑셀 다운로드", data=output.getvalue(),
+                               file_name=out_name,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
