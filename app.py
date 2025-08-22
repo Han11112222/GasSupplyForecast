@@ -213,16 +213,17 @@ def load_data_mixed(actual_src, scenario_src, is_upload: bool):
 
 # ========= 표 숫자 포맷(천단위 콤마) 유틸 =========
 def style_thousands(df: pd.DataFrame, digits: int = 0):
-    """모든 숫자형 컬럼을 천단위 콤마로 포맷. digits는 소수 자릿수."""
-    fmt = {}
+    """
+    모든 숫자형 컬럼을 천단위 콤마로 표시.
+    digits는 반올림 소수 자릿수(0이면 정수로 반올림).
+    """
+    fmt: dict[str, str] = {}
+    digs = max(int(digits), 0)  # 음수 방지
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
-            if digits <= 0:
-                fmt[c] = "{:,}"
-            else:
-                fmt[c] = f"{{:,.{digits}f}}"
+            fmt[c] = f"{{:,.{digs}f}}"  # ← 항상 지정 자릿수로 포맷(0이면 정수)
     sty = df.style.format(fmt)
-    # 인덱스 숨김 버전 호환
+    # 판다스 버전 호환 인덱스 숨김
     if hasattr(sty, "hide_index"):
         sty = sty.hide_index()
     else:
@@ -231,6 +232,7 @@ def style_thousands(df: pd.DataFrame, digits: int = 0):
         except Exception:
             pass
     return sty
+
 
 # =====================================
 # 🖥️ Streamlit UI
