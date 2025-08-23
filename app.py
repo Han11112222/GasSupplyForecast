@@ -7,10 +7,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ---- Matplotlib 캐시 경로(권한 문제 회피) ----
+os.environ["MPLCONFIGDIR"] = os.path.join(tempfile.gettempdir(), "mplconfig")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-
 from matplotlib.ticker import StrMethodFormatter
 
 from sklearn.preprocessing import PolynomialFeatures
@@ -21,77 +24,101 @@ from sklearn.metrics import r2_score, mean_squared_error
 import lightgbm as lgb
 
 # =====================================
-# 🔤 한글 폰트: 자동 다운로드 + Matplotlib + 웹폰트 CSS
+# 🔤 한글 폰트: 로컬 우선 + 자동 다운로드 + Matplotlib + (옵션)웹폰트 CSS
 # =====================================
 FONT_URLS = [
     "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
     "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
     "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
 ]
+LOCAL_FONT_CANDIDATES = [
+    "fonts/NotoSansKR-Regular.otf",          # 리포 동봉
+    "fonts/NanumGothic.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/System/Library/Fonts/AppleGothic.ttf",  # mac
+    "C:/Windows/Fonts/malgun.ttf",            # windows
+]
 
-def _download_font_to_tmp() -> tuple[str | None, str | None]:
-    os.makedirs(os.path.join(tempfile.gettempdir(), "fonts"), exist_ok=True)
+def _download_font_to_tmp() -> str | None:
+    font_dir = os.path.join(tempfile.gettempdir(), "fonts")
+    os.makedirs(font_dir, exist_ok=True)
     for url in FONT_URLS:
         try:
-            local = os.path.join(tempfile.gettempdir(), "fonts", os.path.basename(url))
+            local = os.path.join(font_dir, os.path.basename(url))
             urllib.request.urlretrieve(url, local)
-            return local, url
+            return local
         except Exception:
             continue
-    return None, None
+    return None
 
-def apply_korean_font() -> str | None:
-    chosen = None
+def apply_korean_font() -> tuple[str | None, str | None]:
+    """
+    반환: (font_name, font_path_or_None)
+    1) 로컬/시스템 후보 → 2) 다운로드 → 3) 시스템 이름만 지정
+    """
+    # 1) 로컬/시스템 파일 경로 우선
+    for p in LOCAL_FONT_CANDIDATES:
+        if os.path.exists(p):
+            try:
+                fm.fontManager.addfont(p)
+                try:
+                    fm._load_fontmanager(try_read_cache=False)
+                except Exception:
+                    fm._rebuild()
+                name = fm.FontProperties(fname=p).get_name()
+                mpl.rcParams["font.family"] = name
+                mpl.rcParams["font.sans-serif"] = [name]
+                mpl.rcParams["axes.unicode_minus"] = False
+                mpl.rcParams["pdf.fonttype"] = 42
+                mpl.rcParams["ps.fonttype"] = 42
+                return name, p
+            except Exception:
+                pass
+
+    # 2) 다운로드
+    path = _download_font_to_tmp()
+    if path and os.path.exists(path):
+        try:
+            fm.fontManager.addfont(path)
+            try:
+                fm._load_fontmanager(try_read_cache=False)
+            except Exception:
+                fm._rebuild()
+            name = fm.FontProperties(fname=path).get_name()
+            mpl.rcParams["font.family"] = name
+            mpl.rcParams["font.sans-serif"] = [name]
+            mpl.rcParams["axes.unicode_minus"] = False
+            mpl.rcParams["pdf.fonttype"] = 42
+            mpl.rcParams["ps.fonttype"] = 42
+
+            # 브라우저 UI 글꼴도 맞추고 싶으면 CSS 주입(외부 URL일 때만)
+            st.markdown(
+                f"""
+                <style>
+                html, body, [class*="css"] {{ font-family: '{name}', sans-serif !important; }}
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            return name, path
+        except Exception:
+            pass
+
+    # 3) 최후: 시스템에 등록된 이름만 지정
     for nm in ["Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
         if any(f.name == nm for f in fm.fontManager.ttflist):
-            chosen = nm
-            break
+            mpl.rcParams["font.family"] = nm
+            mpl.rcParams["font.sans-serif"] = [nm]
+            mpl.rcParams["axes.unicode_minus"] = False
+            return nm, None
 
-    css_font_url = None
-    if not chosen:
-        path, css_font_url = _download_font_to_tmp()
-        if path and os.path.exists(path):
-            try:
-                fm.fontManager.addfont(path)
-                try:
-                    fm._load_fontmanager(try_read_cache=False)  # noqa
-                except Exception:
-                    try:
-                        fm._rebuild()  # noqa
-                    except Exception:
-                        pass
-                chosen = fm.FontProperties(fname=path).get_name()
-            except Exception:
-                chosen = None
+    return None, None
 
-    if chosen:
-        mpl.rcParams["font.family"] = chosen
-        mpl.rcParams["font.sans-serif"] = [chosen]
-        mpl.rcParams["axes.unicode_minus"] = False
-        mpl.rcParams["pdf.fonttype"] = 42
-        mpl.rcParams["ps.fonttype"] = 42
-
-    if css_font_url:
-        st.markdown(
-            f"""
-            <style>
-            @font-face {{
-                font-family: 'AppKor';
-                src: url('{css_font_url}') format('opentype');
-                font-weight: normal;
-                font-style: normal;
-            }}
-            html, body, [class*="css"] {{
-                font-family: 'AppKor', {chosen if chosen else 'sans-serif'} !important;
-            }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    return chosen
-
-KOREAN_FONT_NAME = apply_korean_font()
-LEGEND_PROP = fm.FontProperties(family=mpl.rcParams.get("font.family"))
+KOREAN_FONT_NAME, KOREAN_FONT_PATH = apply_korean_font()
+LEGEND_PROP = fm.FontProperties(
+    fname=KOREAN_FONT_PATH
+) if KOREAN_FONT_PATH else fm.FontProperties(family=KOREAN_FONT_NAME or "sans-serif")
 
 # =====================================
 # ⚙️ 유틸
@@ -218,10 +245,10 @@ def style_thousands(df: pd.DataFrame, digits: int = 0):
     digits는 반올림 소수 자릿수(0이면 정수로 반올림).
     """
     fmt: dict[str, str] = {}
-    digs = max(int(digits), 0)  # 음수 방지
+    digs = max(int(digits), 0)
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
-            fmt[c] = f"{{:,.{digs}f}}"  # ← 항상 지정 자릿수로 포맷(0이면 정수)
+            fmt[c] = f"{{:,.{digs}f}}"  # 0이면 정수
     sty = df.style.format(fmt)
     # 판다스 버전 호환 인덱스 숨김
     if hasattr(sty, "hide_index"):
@@ -233,13 +260,12 @@ def style_thousands(df: pd.DataFrame, digits: int = 0):
             pass
     return sty
 
-
 # =====================================
 # 🖥️ Streamlit UI
 # =====================================
 st.set_page_config(page_title="도시가스 공급량 예측/검증", layout="wide")
 st.title("도시가스 공급량 예측 · 검증 대시보드")
-st.caption(f"한글 폰트 적용: {KOREAN_FONT_NAME if KOREAN_FONT_NAME else '다운로드 실패 → 기본 폰트'}")
+st.caption(f"한글 폰트: {KOREAN_FONT_NAME or '미적용'}{' (파일 경로 적용)' if KOREAN_FONT_PATH else ''}")
 
 DEFAULT_ACTUAL_PATH = "data/실적.xlsx"
 DEFAULT_SCENARIO_PATH = "data/기온시나리오.xlsx"
@@ -426,7 +452,7 @@ if run_clicked:
         ax.set_title(f"[예측] 예측연도:{fy} / 시나리오:{fy} / 월 {m1}~{m2} / 학습기간 {train_start}~{train_end}")
         ax.set_xlabel("월"); ax.set_ylabel("예측공급량")
         ax.grid(True, alpha=0.3); ax.set_xticks(range(m1, m2+1))
-        ax.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))  # ← Y축 천단위 콤마
+        ax.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))  # ← Y축 천단위 콤마(정수)
         ax.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 
         if "3차 다항회귀" in trained_pred:
@@ -449,11 +475,10 @@ if run_clicked:
             totals = totals.reindex(pv.columns)  # 열 순서 정렬
             pv.loc["소계(1~12)"] = totals.values
 
-            # 표시: 천단위 콤마(정수)
+            # 표시: 반올림 정수 + 천단위
             st.dataframe(style_thousands(pv.fillna(0).astype(float), digits=0), use_container_width=True)
 
             if want_excel and writer is not None:
-                # 숫자 그대로 저장(소계 포함)
                 pv_to_xlsx = pv.copy()
                 pv_to_xlsx.reset_index(names="Month").to_excel(writer, sheet_name=f"예측피벗(Y={fy})", index=False)
                 preds_forecast.to_excel(writer, sheet_name=f"예측(Y={fy})raw", index=False)
@@ -520,7 +545,7 @@ if run_clicked:
             ax2.set_title(f"[검증] 첫해 기준 Y={base_year} → 실제 {Ym1}(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})")
             ax2.set_xlabel("월"); ax2.set_ylabel("공급량")
             ax2.grid(True, alpha=0.3); ax2.set_xticks(range(m1, m2+1))
-            ax2.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))  # ← Y축 천단위 콤마
+            ax2.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))  # 정수 표시
             ax2.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 
             if "3차 다항회귀" in trained_bt:
