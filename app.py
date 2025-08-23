@@ -24,7 +24,7 @@ from sklearn.metrics import r2_score, mean_squared_error
 import lightgbm as lgb
 
 # =====================================
-# 🔤 한글 폰트: 로컬 우선 + 자동 다운로드 + Matplotlib + (옵션)웹폰트 CSS
+# 🔤 한글 폰트: 로컬 우선 + 자동 다운로드 + Matplotlib + (옵션)웹폰트
 # =====================================
 FONT_URLS = [
     "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
@@ -32,12 +32,12 @@ FONT_URLS = [
     "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Korean/NotoSansKR-Regular.otf",
 ]
 LOCAL_FONT_CANDIDATES = [
-    "fonts/NotoSansKR-Regular.otf",          # 리포 동봉
+    "fonts/NotoSansKR-Regular.otf",
     "fonts/NanumGothic.ttf",
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/System/Library/Fonts/AppleGothic.ttf",  # mac
-    "C:/Windows/Fonts/malgun.ttf",            # windows
+    "/System/Library/Fonts/AppleGothic.ttf",
+    "C:/Windows/Fonts/malgun.ttf",
 ]
 
 def _download_font_to_tmp() -> str | None:
@@ -55,9 +55,9 @@ def _download_font_to_tmp() -> str | None:
 def apply_korean_font() -> tuple[str | None, str | None]:
     """
     반환: (font_name, font_path_or_None)
-    1) 로컬/시스템 후보 → 2) 다운로드 → 3) 시스템 이름만 지정
+    1) 로컬/시스템 → 2) 다운로드 → 3) 시스템 이름만 지정
     """
-    # 1) 로컬/시스템 파일 경로 우선
+    # 1) 로컬/시스템 파일 경로
     for p in LOCAL_FONT_CANDIDATES:
         if os.path.exists(p):
             try:
@@ -91,21 +91,16 @@ def apply_korean_font() -> tuple[str | None, str | None]:
             mpl.rcParams["axes.unicode_minus"] = False
             mpl.rcParams["pdf.fonttype"] = 42
             mpl.rcParams["ps.fonttype"] = 42
-
-            # 브라우저 UI 글꼴도 맞추고 싶으면 CSS 주입(외부 URL일 때만)
+            # UI 텍스트도 맞추고 싶으면 CSS 주입
             st.markdown(
-                f"""
-                <style>
-                html, body, [class*="css"] {{ font-family: '{name}', sans-serif !important; }}
-                </style>
-                """,
+                f"<style>html, body, [class*='css'] {{ font-family: '{name}', sans-serif !important; }}</style>",
                 unsafe_allow_html=True,
             )
             return name, path
         except Exception:
             pass
 
-    # 3) 최후: 시스템에 등록된 이름만 지정
+    # 3) 최후: 시스템에 등록된 이름만
     for nm in ["Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "Malgun Gothic", "AppleGothic"]:
         if any(f.name == nm for f in fm.fontManager.ttflist):
             mpl.rcParams["font.family"] = nm
@@ -116,9 +111,14 @@ def apply_korean_font() -> tuple[str | None, str | None]:
     return None, None
 
 KOREAN_FONT_NAME, KOREAN_FONT_PATH = apply_korean_font()
-LEGEND_PROP = fm.FontProperties(
-    fname=KOREAN_FONT_PATH
-) if KOREAN_FONT_PATH else fm.FontProperties(family=KOREAN_FONT_NAME or "sans-serif")
+
+# ✅ 여기만 바뀜: 문자열 family 대신 리스트/기본값 사용
+if KOREAN_FONT_PATH:
+    LEGEND_PROP = fm.FontProperties(fname=KOREAN_FONT_PATH)
+elif KOREAN_FONT_NAME:
+    LEGEND_PROP = fm.FontProperties(family=[KOREAN_FONT_NAME])  # 리스트로 전달
+else:
+    LEGEND_PROP = fm.FontProperties()  # rcParams 기본
 
 # =====================================
 # ⚙️ 유틸
@@ -250,7 +250,6 @@ def style_thousands(df: pd.DataFrame, digits: int = 0):
         if pd.api.types.is_numeric_dtype(df[c]):
             fmt[c] = f"{{:,.{digs}f}}"  # 0이면 정수
     sty = df.style.format(fmt)
-    # 판다스 버전 호환 인덱스 숨김
     if hasattr(sty, "hide_index"):
         sty = sty.hide_index()
     else:
@@ -452,7 +451,7 @@ if run_clicked:
         ax.set_title(f"[예측] 예측연도:{fy} / 시나리오:{fy} / 월 {m1}~{m2} / 학습기간 {train_start}~{train_end}")
         ax.set_xlabel("월"); ax.set_ylabel("예측공급량")
         ax.grid(True, alpha=0.3); ax.set_xticks(range(m1, m2+1))
-        ax.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))  # ← Y축 천단위 콤마(정수)
+        ax.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))
         ax.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 
         if "3차 다항회귀" in trained_pred:
@@ -470,12 +469,9 @@ if run_clicked:
             st.subheader(f"예측 피벗 (Y={fy})")
 
             pv = preds_forecast.pivot_table(index="Month", columns="Model", values="예측공급량", aggfunc="mean")
-            # 연간 소계(1~12) 계산
-            totals = preds_full.groupby("Model")["예측공급량"].sum()
-            totals = totals.reindex(pv.columns)  # 열 순서 정렬
+            totals = preds_full.groupby("Model")["예측공급량"].sum().reindex(pv.columns)
             pv.loc["소계(1~12)"] = totals.values
 
-            # 표시: 반올림 정수 + 천단위
             st.dataframe(style_thousands(pv.fillna(0).astype(float), digits=0), use_container_width=True)
 
             if want_excel and writer is not None:
@@ -505,10 +501,7 @@ if run_clicked:
             mdl, poly = fit_one_model(name, base, Xb, yb)
             trained_bt[name] = (mdl, poly)
 
-        # 검증 대상: 선택 월
         val_df = data[(data["Year"]==Ym1)&(data["Month"]>=m1)&(data["Month"]<=m2)].dropna(subset=["공급량","평균기온"])
-
-        # 검증 대상(연간 소계용): 1~12월
         val_df_full = data[(data["Year"]==Ym1)&(data["Month"]>=1)&(data["Month"]<=12)].dropna(subset=["공급량","평균기온"])
 
         if val_df.empty:
@@ -530,7 +523,6 @@ if run_clicked:
             preds_val_df = pd.concat(preds_all, ignore_index=True) if preds_all else pd.DataFrame()
             metrics_df = pd.DataFrame(rows, columns=["Model","R2(검증)","RMSE","MAPE(%)"]).sort_values("R2(검증)", ascending=False)
 
-            # 그래프
             fig2, ax2 = plt.subplots(figsize=(11,5))
             gv = val_df.sort_values("Month")
             ax2.plot(gv["Month"], gv["공급량"], linestyle="--", marker="o", linewidth=3.0, label=f"실제 {Ym1}")
@@ -545,7 +537,7 @@ if run_clicked:
             ax2.set_title(f"[검증] 첫해 기준 Y={base_year} → 실제 {Ym1}(점선) vs 예측 (학습기간 {train_start}~{train_bt_end})")
             ax2.set_xlabel("월"); ax2.set_ylabel("공급량")
             ax2.grid(True, alpha=0.3); ax2.set_xticks(range(m1, m2+1))
-            ax2.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))  # 정수 표시
+            ax2.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))
             ax2.legend(loc="best", fontsize=9, ncol=2, prop=LEGEND_PROP)
 
             if "3차 다항회귀" in trained_bt:
@@ -553,13 +545,12 @@ if run_clicked:
                 eq_bt = format_poly_equation(mdl_bt, poly_bt)
                 if eq_bt:
                     fig2.subplots_adjust(bottom=0.18)
-                    r2_val = metrics_df.loc[metrics_df["Model"]=="3차 다항회귀","R2(검증)"]
-                    r2_val = float(r2_val.iloc[0]) if len(r2_val)>0 else np.nan
+                    s = metrics_df.loc[metrics_df["Model"]=="3차 다항회귀","R2(검증)"]
+                    r2_val = float(s.iloc[0]) if len(s)>0 else np.nan
                     fig2.text(0.5, 0.02, f"{eq_bt} | 검증 R²={r2_val:.3f}", ha="center", va="bottom", fontsize=10, fontproperties=LEGEND_PROP)
 
             st.pyplot(fig2, use_container_width=True)
 
-            # 표: 성능요약
             if show_tables:
                 st.subheader(f"검증 성능 요약 (기준연도 Y={base_year})")
                 st.dataframe(metrics_df.reset_index(drop=True).round(4), use_container_width=True)
@@ -568,7 +559,6 @@ if run_clicked:
                     merged = preds_val_df.merge(val_df[["Month","공급량"]], on="Month", how="left", suffixes=("","_실제"))
                     pv_val = merged.pivot_table(index="Month", columns="Model", values="예측공급량", aggfunc="mean")
 
-                    # 연간 소계(1~12) 계산을 위해 예측값/실제값 1~12월 전부 예측
                     preds_all_full_rows = []
                     for name,(mdl,poly) in trained_bt.items():
                         yhat_full = predict_with(name, mdl, poly, val_df_full[["평균기온"]].values)
@@ -576,10 +566,7 @@ if run_clicked:
                         preds_all_full_rows.append(tmpf)
                     preds_val_full = pd.concat(preds_all_full_rows, ignore_index=True) if preds_all_full_rows else pd.DataFrame()
 
-                    # 실제 컬럼 추가
                     pv_val["실제"] = val_df.set_index("Month")["공급량"]
-
-                    # 소계(1~12)
                     totals_pred = preds_val_full.groupby("Model")["예측공급량"].sum() if not preds_val_full.empty else pd.Series(dtype=float)
                     totals_row = {col: totals_pred.get(col, np.nan) for col in pv_val.columns if col != "실제"}
                     totals_row["실제"] = val_df_full["공급량"].sum() if not val_df_full.empty else np.nan
